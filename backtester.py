@@ -1,12 +1,14 @@
 """
 backtester.py
-Simulates the regime-based strategy on a single NSE stock.
+Simulates the regime-based strategy on a single NSE/BSE stock.
 
 Rules:
   • Entry  : HMM = Bull Run  AND  Confirmations >= 7 out of 8
   • Exit   : HMM flips to Bear/Crash  (regime-based hard stop)
   • Cooldown: 2 trading days after any exit before re-entry allowed
-  • Capital : ₹1,00,000 per stock (configurable)
+  • Sizing  : ATR-based — shares = risk_per_trade / (ATR × atr_multiplier)
+              Volatile stocks get smaller allocations automatically.
+              Position is capped at starting_capital so it never exceeds ₹1L.
   • Costs   : ₹20 flat per order (Zerodha) + 0.1% STT on sell side
   • Circuit  : If stock hits a ±20% circuit on exit day, exit at 20% limit price
 """
@@ -21,12 +23,16 @@ from typing import Optional
 from indicators import add_indicators, add_confirmations
 from hmm_engine import fit_hmm, build_regime_series, state_to_label
 
-STARTING_CAPITAL  = 100_000   # ₹1 lakh
+STARTING_CAPITAL  = 100_000   # ₹1 lakh — also the hard cap per position
 BROKERAGE_PER_LEG = 20.0      # Zerodha flat ₹20
 STT_SELL_RATE     = 0.001     # 0.1% on sell turnover
-CIRCUIT_LIMIT     = 0.20      # NSE 20% circuit breaker
+CIRCUIT_LIMIT     = 0.20      # NSE/BSE 20% circuit breaker
 COOLDOWN_DAYS     = 2         # trading-day cooldown after any exit
 MIN_CONFIRMATIONS = 7
+
+# ATR position-sizing defaults (overridable via run_backtest params)
+DEFAULT_RISK_PER_TRADE = 2_000.0   # ₹2,000 risked per trade (~2% of ₹1L)
+DEFAULT_ATR_MULTIPLIER = 2.0       # stop distance = 2× ATR
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -70,6 +76,8 @@ def run_backtest(
     df_raw: pd.DataFrame,
     ticker: str,
     capital: float = STARTING_CAPITAL,
+    risk_per_trade: float = DEFAULT_RISK_PER_TRADE,
+    atr_multiplier: float = DEFAULT_ATR_MULTIPLIER,
 ) -> Optional[BacktestResult]:
     """
     Full backtest on daily OHLCV data.
@@ -113,6 +121,7 @@ def run_backtest(
 
     dates  = df.index.tolist()
     closes = df["Close"].values
+    atrs   = df["ATR"].values
     bears  = df["is_bear"].values
     sigs   = df["Entry_Signal"].values
 
@@ -131,14 +140,15 @@ def run_backtest(
                 ret_pct = (exit_price - entry_price) / entry_price * 100
 
                 trades_list.append({
-                    "Entry Date":  entry_date,
-                    "Exit Date":   date,
-                    "Entry Price": round(entry_price, 2),
-                    "Exit Price":  round(exit_price,  2),
-                    "Shares":      shares,
-                    "PnL (₹)":     round(pnl, 2),
-                    "Return %":    round(ret_pct, 2),
-                    "Exit Reason": "Bear/Crash Regime",
+                    "Entry Date":   entry_date,
+                    "Exit Date":    date,
+                    "Entry Price":  round(entry_price, 2),
+                    "Exit Price":   round(exit_price,  2),
+                    "Shares":       shares,
+                    "Position (₹)": round(entry_price * shares, 2),
+                    "PnL (₹)":      round(pnl, 2),
+                    "Return %":     round(ret_pct, 2),
+                    "Exit Reason":  "Bear/Crash Regime",
                     "Duration (d)": (date - entry_date).days,
                 })
 
@@ -155,12 +165,22 @@ def run_backtest(
 
             # ── Entry condition ──────────────────────────────────────────────
             if sigs[i]:
-                max_shares = int(capital / close)   # deploy exactly ₹1L of capital
-                if max_shares > 0:
-                    cost = close * max_shares + _transaction_cost(close, max_shares, "buy")
+                atr_val = atrs[i]
+                # Fallback: if ATR is NaN or zero, use 2% of price as estimate
+                if np.isnan(atr_val) or atr_val <= 0:
+                    atr_val = close * 0.02
+
+                # ATR-based shares: risk ÷ (ATR × multiplier)
+                raw_shares = int(risk_per_trade / (atr_val * atr_multiplier))
+                # Hard cap: never deploy more than starting_capital per position
+                cap_shares = int(capital / close)
+                shares_to_buy = min(raw_shares, cap_shares)
+
+                if shares_to_buy > 0:
+                    cost = close * shares_to_buy + _transaction_cost(close, shares_to_buy, "buy")
                     if cost <= cash:
                         cash        -= cost
-                        shares       = max_shares
+                        shares       = shares_to_buy
                         entry_price  = close
                         entry_date   = date
                         in_position  = True
@@ -175,14 +195,15 @@ def run_backtest(
         pnl        = (exit_price - entry_price) * shares - costs - _transaction_cost(entry_price, shares, "buy")
         ret_pct    = (exit_price - entry_price) / entry_price * 100
         trades_list.append({
-            "Entry Date":  entry_date,
-            "Exit Date":   dates[-1],
-            "Entry Price": round(entry_price, 2),
-            "Exit Price":  round(exit_price,  2),
-            "Shares":      shares,
-            "PnL (₹)":     round(pnl, 2),
-            "Return %":    round(ret_pct, 2),
-            "Exit Reason": "End of Period",
+            "Entry Date":   entry_date,
+            "Exit Date":    dates[-1],
+            "Entry Price":  round(entry_price, 2),
+            "Exit Price":   round(exit_price,  2),
+            "Shares":       shares,
+            "Position (₹)": round(entry_price * shares, 2),
+            "PnL (₹)":      round(pnl, 2),
+            "Return %":     round(ret_pct, 2),
+            "Exit Reason":  "End of Period",
             "Duration (d)": (dates[-1] - entry_date).days,
         })
 
@@ -193,7 +214,7 @@ def run_backtest(
     portfolio = pd.Series(portfolio_vals[: len(df)], index=df.index, name="Portfolio")
     trades_df = pd.DataFrame(trades_list) if trades_list else pd.DataFrame(
         columns=["Entry Date", "Exit Date", "Entry Price", "Exit Price",
-                 "Shares", "PnL (₹)", "Return %", "Exit Reason", "Duration (d)"]
+                 "Shares", "Position (₹)", "PnL (₹)", "Return %", "Exit Reason", "Duration (d)"]
     )
 
     # ── 5. Performance metrics ────────────────────────────────────────────────

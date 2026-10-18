@@ -1,113 +1,82 @@
-# 📡 NSE Regime-Based Trading Scanner
+# NSE Regime Scanner
 
-A multi-stock research tool for Indian NSE equities using Hidden Markov Models
-to detect market regimes and an 8-confirmation voting system to surface trade candidates.
+A Streamlit scanner that fits a walk-forward Hidden Markov Model to every stock in an NSE/BSE universe, takes long trades only in a Bull regime confirmed by 7 of 8 technical checks, and ranks the top 20 by backtested alpha, win rate and drawdown.
 
----
+![Regime Scanner start screen](docs/assets/app.png)
+
+Every regime label used in the backtest is out-of-sample: the model for day *t* is trained only on the 252 trading days before it.
+
+## What it does
+
+- **Loads a universe** of NSE and BSE equities: Large Cap (NIFTY 50 + SENSEX 30, ~80 stocks), Mid/Large (NSE 500 + BSE 500, ~700) or All Markets (~6,800).
+- **Downloads daily OHLCV** from Yahoo Finance in batches of 50 tickers.
+- **Detects regimes** with a 7-state `GaussianHMM` on three winsorised features (daily return, high–low range ratio, 20-day volume z-score). The model is refit on a rolling 252-day window every 5 days; the state with the highest mean return is Bull, the lowest is Bear/Crash.
+- **Confirms entries** only in a Bull regime with at least 7 of these 8 checks passing:
+
+  | # | Check | Rule |
+  |---|---|---|
+  | 1 | RSI (14) | 40 < RSI < 75 |
+  | 2 | Momentum | 20-day change > 1% |
+  | 3 | Volatility | annualised < 50% |
+  | 4 | Volume | above its 20-day SMA |
+  | 5 | ADX (14) | > 25 |
+  | 6 | Trend | close > EMA 50 |
+  | 7 | Trend | close > EMA 200 |
+  | 8 | MACD | MACD line > signal line |
+
+- **Backtests** each stock: exit immediately on a Bear/Crash flip, 2-trading-day cooldown after any exit, exit price capped at the 20% circuit limit, ₹20 brokerage per order and 0.1% STT on sells.
+- **Sizes positions by ATR**: shares = risk per trade ÷ (ATR × multiplier), defaults ₹2,000 and 2.0, capped at ₹1 lakh per position. Both are sidebar sliders.
+- **Ranks** the top 20 with `score = 0.40 × alpha + 0.30 × win rate − 0.30 × max drawdown`, LONG signals above CASH, with equity-curve and regime-shaded price charts per stock.
 
 ## Architecture
 
 ```
-regime_trader/
-├── app.py              ← Streamlit dashboard (run this)
-├── universe_loader.py  ← NSE stock universe (NIFTY 50 / 500 / All NSE)
-├── data_loader.py      ← Batch yfinance OHLCV downloader
-├── hmm_engine.py       ← 7-state GaussianHMM, auto-labels Bull/Bear states
-├── indicators.py       ← RSI, ADX, EMA, MACD, Momentum, Volatility
-├── backtester.py       ← Full simulation with ₹1L capital per stock
-├── scanner.py          ← Parallel scan, produces top-20 ranked results
-└── requirements.txt
+app.py (Streamlit)
+  universe_loader   NSE / BSE equity lists  ->  chosen universe
+  scanner           8 parallel workers, 50-ticker yfinance batches
+    data_loader     daily OHLCV
+    hmm_engine      rolling 252-day GaussianHMM (7 states)  ->  Bull / Bear / Neutral per day
+    indicators      RSI, momentum, volatility, volume, ATR, ADX, EMA 50/200, MACD  ->  8 confirmations
+    backtester      regime + confirmations  ->  trades, equity curve, alpha, win rate, drawdown, Sharpe
+  ->  top-20 table and per-stock charts
 ```
 
----
+## Requirements
 
-## Setup
+- Python 3.10+
+- Network access to Yahoo Finance and the NSE/BSE equity lists
+
+## Run locally
 
 ```bash
-# 1. Create virtual environment
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Run the app
-streamlit run app.py
+make setup        # python3 -m venv venv && pip install -r requirements.txt
+make run          # streamlit run app.py  ->  http://localhost:8501
 ```
 
----
+Pick a universe in the sidebar and click **Run scan**. Rough timings: Large Cap ~2 min, Mid/Large ~10 min, All Markets ~60 min.
 
-## Strategy Logic
+| Command | What it does |
+|---|---|
+| `make setup` | create `venv/` and install requirements |
+| `make run` | start the Streamlit app |
+| `make test` | byte-compile every module |
 
-### Regime Detection (HMM Core)
-- **Model**: `hmmlearn.GaussianHMM` with **7 components**, `diag` covariance
-- **Features** (3):
-  1. Daily returns
-  2. Range ratio  `(High − Low) / Close` — volatility proxy
-  3. Volume z-score  (20-period rolling)
-- **Auto-labelling**: Bull Run = highest mean-return state, Bear/Crash = lowest
-- All features are winsorised at 1st/99th percentile to handle NSE small-cap outliers
+## Project structure
 
-### Entry: 8-Confirmation Voting System
-Entry only when **Regime = Bull Run AND ≥ 7 of 8 conditions pass**:
-
-| # | Condition | Threshold |
-|---|-----------|-----------|
-| 1 | RSI | < 90 (not overbought) |
-| 2 | Momentum | > 1% (positive 20-day trend) |
-| 3 | Volatility | < 6% (annualised, not choppy) |
-| 4 | Volume | > 20-period SMA |
-| 5 | ADX | > 25 (trending, not ranging) |
-| 6 | Price vs EMA 50 | Price > EMA 50 |
-| 7 | Price vs EMA 200 | Price > EMA 200 |
-| 8 | MACD | MACD line > Signal line |
-
-### Exit Rules
-- **Regime flip**: Exit immediately if HMM detects Bear/Crash state
-- **Cooldown**: 2 trading days (≈ 48hrs) after any exit before re-entry
-- **Circuit cap**: Exit price capped at ±20% of entry (NSE circuit breaker)
-
-### Risk & Costs
-- **Capital**: ₹1,00,000 per stock (₹1 lakh)
-- **Brokerage**: ₹20 flat per order (Zerodha model)
-- **STT**: 0.1% on sell-side turnover
-
----
-
-## Universe Options
-
-| Option | Stocks | Time |
-|--------|--------|------|
-| NIFTY 50 | ~50 | ~1 min |
-| NIFTY 500 ⭐ | ~500 | ~5 min |
-| All NSE | ~1,800 | ~15 min |
-
-> **Recommended**: Start with NIFTY 500. It covers the most liquid and data-reliable stocks.
-> The full NSE list includes many SME/illiquid stocks where yfinance data may be sparse.
-
----
-
-## Output
-
-The **Top 20** stocks are ranked by a composite score:
 ```
-Score = (Alpha × 0.40) + (Win Rate × 0.30) + (Max Drawdown × −0.30)
+app.py              Streamlit dashboard
+universe_loader.py  NSE / BSE universes
+data_loader.py      batched yfinance OHLCV download
+hmm_engine.py       walk-forward 7-state HMM and regime labelling
+indicators.py       technical indicators and the 8 confirmations
+backtester.py       per-stock simulation, costs, ATR sizing, metrics
+scanner.py          parallel scan and top-20 ranking
+requirements.txt
+Makefile
 ```
-LONG signals always surface above CASH signals in the ranking.
 
-### Metrics displayed
-- **Total Return %** — strategy equity curve return
-- **Alpha %** — outperformance vs Buy & Hold
-- **Win Rate %** — % of closed trades in profit
-- **Max Drawdown %** — worst peak-to-trough drop
-- **Sharpe Ratio** — annualised (daily return / daily σ × √252)
+## Caveats
 
----
-
-## Notes
-
-- This is a **backtesting / research tool**, not a live trading system.
-- Past performance does not guarantee future results.
-- yfinance data for smaller NSE stocks can have gaps; the scanner silently skips
-  tickers with < 252 bars of usable data.
-- For live signal generation, integrate the backtester output with the Kite MCP.
+- A research and backtesting tool, not a live trading system and not investment advice.
+- Yahoo data for small NSE/BSE stocks can have gaps; tickers with under 252 usable bars are skipped.
+- Long-only; results ignore dividends, slippage and impact beyond the stated charges.

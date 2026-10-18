@@ -46,6 +46,17 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
+def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series,
+                period: int = 14) -> pd.Series:
+    """Average True Range — Wilder smoothed, same period as ADX."""
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+    return _wilder_smooth(tr, period)
+
+
 def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series,
                 period: int = 14) -> pd.Series:
     tr = pd.concat([
@@ -57,7 +68,6 @@ def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series,
     dm_plus_raw  = high.diff().clip(lower=0)
     dm_minus_raw = (-low.diff()).clip(lower=0)
 
-    # A directional move only counts when it exceeds the opposite
     dm_plus  = dm_plus_raw.where(dm_plus_raw  > dm_minus_raw, 0.0)
     dm_minus = dm_minus_raw.where(dm_minus_raw > dm_plus_raw,  0.0)
 
@@ -92,7 +102,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # ── 4. Volume vs 20-SMA ───────────────────────────────────────────────────
     df["Volume_SMA20"] = volume.rolling(20).mean()
 
-    # ── 5. ADX ────────────────────────────────────────────────────────────────
+    # ── 5. ATR & ADX ──────────────────────────────────────────────────────────
+    df["ATR"] = compute_atr(high, low, close, 14)
     df["ADX"] = compute_adx(high, low, close, 14)
 
     # ── 6 & 7. EMAs ──────────────────────────────────────────────────────────

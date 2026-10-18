@@ -283,6 +283,8 @@ def _regime_bg_shapes(df: pd.DataFrame) -> list[dict]:
     return shapes
 
 
+
+
 def build_chart(result: BacktestResult) -> go.Figure:
     df = result.df
 
@@ -478,11 +480,11 @@ with st.sidebar:
     st.markdown("""
     <div style="font-family:'IBM Plex Mono',monospace; font-size:1.1rem;
          color:#4FC3F7; font-weight:600; margin-bottom:0.2rem;">
-    📡 NSE REGIME SCANNER
+    📡 REGIME SCANNER
     </div>
     <div style="font-size:0.7rem; color:#5C7A9F; margin-bottom:1.5rem;
          font-family:'IBM Plex Mono',monospace;">
-    HMM · 7 States · 8 Confirmations
+    NSE · BSE · HMM · 7 States · 8 Confirmations
     </div>
     """, unsafe_allow_html=True)
 
@@ -493,24 +495,24 @@ with st.sidebar:
     )
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("**Strategy Parameters**")
+    st.markdown("**Position Sizing  —  ATR-Based**")
+    st.markdown("""
+    <div style="font-size:0.7rem;color:#5C7A9F;line-height:1.6;margin-bottom:0.5rem;">
+    Shares = Risk ÷ (ATR × Multiplier)<br>
+    Volatile stocks get smaller allocations.
+    </div>
+    """, unsafe_allow_html=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div style="font-size:0.72rem;color:#5C7A9F;">Min Confirms</div>',
-                    unsafe_allow_html=True)
-        st.markdown('<div style="font-size:1rem;color:#C8D0E0;">7 / 8</div>',
-                    unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div style="font-size:0.72rem;color:#5C7A9F;">Cooldown</div>',
-                    unsafe_allow_html=True)
-        st.markdown('<div style="font-size:1rem;color:#C8D0E0;">2 trading days</div>',
-                    unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("**Capital per Stock**")
-    st.markdown('<div style="font-size:1.05rem;color:#4FC3F7;font-family:\'IBM Plex Mono\';">₹1,00,000</div>',
-                unsafe_allow_html=True)
+    risk_per_trade = st.slider(
+        "Risk per trade (₹)",
+        min_value=500, max_value=10_000, value=2_000, step=500,
+        help="Max ₹ risked per position based on ATR stop distance.",
+    )
+    atr_multiplier = st.slider(
+        "ATR multiplier",
+        min_value=1.0, max_value=5.0, value=2.0, step=0.5,
+        help="Stop distance = ATR × multiplier. Higher = wider stop, smaller position.",
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("**Exit Rule**")
@@ -533,7 +535,8 @@ with st.sidebar:
     Data: NSE daily via yfinance<br>
     Model: GaussianHMM (7 states)<br>
     Features: Returns · Range · Vol-Z<br>
-    Period: 2 years · Daily candles
+    Train: Rolling 252-day window<br>
+    Signal: Next-day OOS prediction
     </div>
     """, unsafe_allow_html=True)
 
@@ -545,8 +548,8 @@ with st.sidebar:
 st.markdown("""
 <div class="app-header">
   <div>
-    <div class="app-title">📡 NSE REGIME SCANNER</div>
-    <div class="app-subtitle">Hidden Markov Model · 7 States · 8-Confirmation Voting · NSE Daily Data</div>
+    <div class="app-title">📡 REGIME SCANNER  <span style="font-size:0.9rem;color:#5C7A9F;">NSE + BSE</span></div>
+    <div class="app-subtitle">Rolling 252-Day HMM · 7 States · OOS Regime Signal · 8-Confirmation Voting</div>
   </div>
   <div style="font-family:'IBM Plex Mono',monospace; font-size:0.75rem; color:#5C7A9F; text-align:right;">
     Strategy: Regime-Based Entry<br>
@@ -602,6 +605,8 @@ if run_scan:
         tickers,
         on_download_progress=on_dl,
         on_process_progress=on_pr,
+        risk_per_trade=float(risk_per_trade),
+        atr_multiplier=float(atr_multiplier),
     )
     elapsed = time.time() - t0
 
@@ -695,7 +700,18 @@ if st.session_state.scan_done and st.session_state.all_results:
 
     st.markdown('<div class="section-title">STOCK DEEP-DIVE</div>', unsafe_allow_html=True)
 
-    ticker_labels = [r.ticker.replace(".NS", "") for r in results]
+    # Mirror the same label logic used in scanner.py
+    _base_counts: dict[str, int] = {}
+    for r in results:
+        b = r.ticker.rsplit(".", 1)[0]
+        _base_counts[b] = _base_counts.get(b, 0) + 1
+
+    def _ticker_label(ticker: str) -> str:
+        base, _, suffix = ticker.rpartition(".")
+        exchange = "NSE" if suffix == "NS" else "BSE"
+        return f"{base} ({exchange})" if _base_counts.get(base, 0) > 1 else base
+
+    ticker_labels = [_ticker_label(r.ticker) for r in results]
     selected_label = st.selectbox(
         "Select stock to analyse:",
         ticker_labels,
@@ -715,7 +731,7 @@ if st.session_state.scan_done and st.session_state.all_results:
         chg_pct    = (last_close - prev_close) / prev_close * 100
         chg_class  = "green" if chg_pct >= 0 else "red"
         st.markdown(f"""
-        <div class="ticker-header">{sel.ticker.replace('.NS','')}.NS</div>
+        <div class="ticker-header">{_ticker_label(sel.ticker)}</div>
         <div class="ticker-sub">
           ₹{last_close:,.2f}
           <span class="{chg_class}">&nbsp;{_signed(chg_pct, '.2f')}% today</span>
@@ -796,10 +812,11 @@ if st.session_state.scan_done and st.session_state.all_results:
 
             styled = df.style.apply(row_style, axis=1)
             styled = styled.format({
-                "Entry Price": "₹{:,.2f}",
-                "Exit Price":  "₹{:,.2f}",
-                "PnL (₹)":    "₹{:+,.2f}",
-                "Return %":   "{:+.2f}%",
+                "Entry Price":  "₹{:,.2f}",
+                "Exit Price":   "₹{:,.2f}",
+                "Position (₹)": "₹{:,.0f}",
+                "PnL (₹)":     "₹{:+,.2f}",
+                "Return %":    "{:+.2f}%",
                 "Duration (d)": "{:.0f}d",
             })
             styled = styled.map(

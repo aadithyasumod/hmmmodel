@@ -15,16 +15,21 @@ from typing import Callable, Optional
 import pandas as pd
 
 from data_loader import fetch_batch, BATCH_SIZE
-from backtester import run_backtest, BacktestResult
+from backtester import run_backtest, BacktestResult, DEFAULT_RISK_PER_TRADE, DEFAULT_ATR_MULTIPLIER
 
 MAX_WORKERS      = 8     # parallel HMM fits
 DOWNLOAD_CHUNK   = 50    # tickers per yfinance batch call
 
 
-def _process_one(ticker: str, df: pd.DataFrame) -> Optional[BacktestResult]:
+def _process_one(
+    ticker: str,
+    df: pd.DataFrame,
+    risk_per_trade: float,
+    atr_multiplier: float,
+) -> Optional[BacktestResult]:
     """Runs backtest for a single ticker; returns None on any failure."""
     try:
-        return run_backtest(df, ticker)
+        return run_backtest(df, ticker, risk_per_trade=risk_per_trade, atr_multiplier=atr_multiplier)
     except Exception:
         return None
 
@@ -33,6 +38,8 @@ def scan_universe(
     tickers: list[str],
     on_download_progress: Optional[Callable[[int, int], None]] = None,
     on_process_progress:  Optional[Callable[[int, int], None]] = None,
+    risk_per_trade: float = DEFAULT_RISK_PER_TRADE,
+    atr_multiplier: float = DEFAULT_ATR_MULTIPLIER,
 ) -> tuple[pd.DataFrame, list[BacktestResult]]:
     """
     Full pipeline scan.
@@ -72,7 +79,7 @@ def scan_universe(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         future_to_ticker = {
-            ex.submit(_process_one, t, data_map[t]): t
+            ex.submit(_process_one, t, data_map[t], risk_per_trade, atr_multiplier): t
             for t in valid_tickers
         }
         for future in concurrent.futures.as_completed(future_to_ticker):
@@ -86,8 +93,22 @@ def scan_universe(
     if not results:
         return pd.DataFrame(), []
 
-    # ── Phase 3: Rank all results ─────────────────────────────────────────────
-    # LONG signals always surface above CASH signals; within each group sort by score
+    # ── Phase 3: Detect cross-listed duplicates ───────────────────────────────
+    # A company is "duplicate" if its base symbol appears on both .NS and .BO.
+    # In that case label each row with (NSE) / (BSE) so the user can tell them apart.
+    base_symbols: dict[str, int] = {}   # base → count of exchanges
+    for r in results:
+        base = r.ticker.rsplit(".", 1)[0]
+        base_symbols[base] = base_symbols.get(base, 0) + 1
+
+    def _ticker_label(ticker: str) -> str:
+        base, _, suffix = ticker.rpartition(".")
+        exchange = "NSE" if suffix == "NS" else "BSE"
+        if base_symbols.get(base, 0) > 1:
+            return f"{base} ({exchange})"
+        return base
+
+    # ── Phase 4: Rank all results ─────────────────────────────────────────────
     long_results = [r for r in results if r.current_signal == "LONG"]
     cash_results = [r for r in results if r.current_signal == "CASH"]
 
@@ -99,7 +120,7 @@ def scan_universe(
     rows = []
     for r in all_ranked:
         rows.append({
-            "Ticker":         r.ticker.replace(".NS", ""),
+            "Ticker":         _ticker_label(r.ticker),
             "Signal":         r.current_signal,
             "Regime":         r.current_regime,
             "Confirms (now)": r.confirmations_now,
