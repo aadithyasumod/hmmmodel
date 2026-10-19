@@ -1,5 +1,7 @@
 # NSE Regime Scanner
 
+[![CI](https://github.com/aadithyasumod/hmmmodel/actions/workflows/ci.yml/badge.svg)](https://github.com/aadithyasumod/hmmmodel/actions/workflows/ci.yml) ![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white) ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white) ![hmmlearn](https://img.shields.io/badge/hmmlearn-GaussianHMM-4B8BBE) ![License](https://img.shields.io/badge/license-all%20rights%20reserved-lightgrey)
+
 A Streamlit scanner that fits a walk-forward Hidden Markov Model to every stock in an NSE/BSE universe, takes long trades only in a Bull regime confirmed by 7 of 8 technical checks, and ranks the top 20 by backtested alpha, win rate and drawdown.
 
 ![Regime Scanner start screen](docs/assets/app.png)
@@ -80,3 +82,9 @@ Makefile
 - A research and backtesting tool, not a live trading system and not investment advice.
 - Yahoo data for small NSE/BSE stocks can have gaps; tickers with under 252 usable bars are skipped.
 - Long-only; results ignore dividends, slippage and impact beyond the stated charges.
+
+## License
+
+Copyright © 2026 aadithyasumod. All rights reserved.
+
+No license is granted. The code is published for reference: you may view it, but not use, copy, modify or distribute it without written permission.
